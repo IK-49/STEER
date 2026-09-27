@@ -1,1 +1,6 @@
 .venv/
+DESIGN.txt
+cdc 26.pdf
+__pycache__/
+.pytest_cache/
+*.py[cod]
