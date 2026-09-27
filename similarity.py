@@ -1,4 +1,4 @@
-"""Per-search school similarity, mathematical modeling, and statutory grant synthesis."""
+"""Name-keyed profile comparisons and descriptive domain-spread calculations."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ import pandas as pd
 from sklearn.neighbors import NearestNeighbors
 from sklearn.preprocessing import StandardScaler
 
-from data import COMPOSITE, DOMAINS, IDENTIFIER, RECORD_KEY
+from data import COMPOSITE, DOMAINS, RECORD_KEY
 
 
 class SearchError(ValueError):
@@ -53,24 +53,41 @@ def calculate_tipping_point(
     stds: dict[str, float],
     dominant_domain: str,
     target_cmi: float = 1.0,
-) -> float:
-    """Binary search solver for minimum point reduction in dominant domain to reduce CMI <= target_cmi."""
+) -> float | None:
+    """Solve for a hypothetical score shift that brings selected-domain spread under a threshold."""
     val_orig = float(target_values.get(dominant_domain, 0.0))
-    if val_orig <= 0.0 or not domains or dominant_domain not in stds or stds[dominant_domain] == 0:
-        return 0.0
+    if not domains or dominant_domain not in stds:
+        return None
 
     curr_z = [(target_values[d] - means[d]) / (stds[d] or 1.0) for d in domains]
     if float(np.std(curr_z)) <= target_cmi:
         return 0.0
 
-    low, high = 0.0, val_orig
-    best_reduction = val_orig
+    if len(domains) <= 1:
+        return 0.0
+    if val_orig <= 0.0 or stds[dominant_domain] == 0:
+        return None
+
+    current_z = {d: (target_values[d] - means[d]) / (stds[d] or 1.0) for d in domains}
+    other_mean = float(np.mean([value for domain, value in current_z.items() if domain != dominant_domain]))
+    scale = stds[dominant_domain] or 1.0
+    # Variance is minimized when this domain's z-score reaches the mean of the others.
+    best_reduction = min(val_orig, max(0.0, (current_z[dominant_domain] - other_mean) * scale))
+    best_z = [
+        (max(0.0, val_orig - best_reduction) - means[d]) / (stds[d] or 1.0)
+        if d == dominant_domain else current_z[d]
+        for d in domains
+    ]
+    if float(np.std(best_z)) > target_cmi:
+        return None
+
+    low, high = 0.0, best_reduction
 
     for _ in range(25):
         mid = (low + high) / 2.0
         test_z = [
             (max(0.0, val_orig - mid) - means[d]) / (stds[d] or 1.0) if d == dominant_domain
-            else (target_values[d] - means[d]) / (stds[d] or 1.0)
+            else current_z[d]
             for d in domains
         ]
         if float(np.std(test_z)) <= target_cmi:
@@ -94,14 +111,14 @@ def find_similar_schools(
     selected = _check_domains(domains)
     if not isinstance(k, int) or isinstance(k, bool) or not 3 <= k <= 10:
         raise SearchError("K must be an integer from 3 through 10.")
-    identity_column = RECORD_KEY if RECORD_KEY in frame.columns else IDENTIFIER
-    required = {identity_column, IDENTIFIER, *selected, "State", "County", "Name", COMPOSITE}
+    identity_column = RECORD_KEY
+    required = {identity_column, *selected, "State", "Name", COMPOSITE}
     if not required.issubset(frame.columns):
         raise SearchError("The dataset does not contain all fields required for this search.")
     target_id = str(target_id).strip()
     target_rows = frame.loc[frame[identity_column].astype(str).str.strip() == target_id]
     if len(target_rows) != 1:
-        raise SearchError("Select a school with one unique NCESSCH identifier.")
+        raise SearchError("Select a school with one unique name and location.")
     target = target_rows.iloc[0].copy()
 
     chosen_values: dict[str, float] = {}
@@ -122,7 +139,7 @@ def find_similar_schools(
     pool = frame.copy(deep=True)
     if state:
         pool = pool.loc[pool["State"].astype(str).str.strip().str.casefold() == state.strip().casefold()].copy()
-    if county:
+    if county and "County" in pool:
         pool = pool.loc[pool["County"].astype(str).str.strip().str.casefold() == county.strip().casefold()].copy()
     target_mask = pool[identity_column].astype(str).str.strip().eq(target_id)
     if not target_mask.any():
@@ -147,20 +164,17 @@ def find_similar_schools(
     target_vector = scaler.transform(np.array([[chosen_values[d] for d in effective_domains]], dtype=float))
 
     # 2. Optimized spatial index query using C-level priority queue heap
-    n_query = min(len(pool), max(k * 2, 20))
-    neighbors = NearestNeighbors(n_neighbors=n_query, metric="euclidean", algorithm="auto")
-    neighbors.fit(candidate_scaled)
-    distances, indices = neighbors.kneighbors(target_vector)
-
-    ordered = sorted(
-        ((float(distance), int(position)) for distance, position in zip(distances[0], indices[0])),
-        key=lambda item: (item[0], str(pool.iloc[item[1]][identity_column])),
-    )[:k]
+    # One vectorized exact query avoids per-keystroke tree construction while
+    # allowing deterministic sorting of every candidate, including distance ties.
+    all_distances = np.linalg.norm(candidate_scaled - target_vector[0], axis=1)
+    names = pool["Name"].astype(str).str.casefold().to_numpy()
+    keys = pool[identity_column].astype(str).to_numpy()
+    positions = np.lexsort((keys, names, all_distances))[:k]
+    ordered = [(float(all_distances[position]), int(position)) for position in positions]
 
     result = pool.iloc[[position for _, position in ordered]].copy().reset_index(drop=True)
     result.insert(0, "Rank", range(1, k + 1))
     result["Distance"] = [distance for distance, _ in ordered]
-    result["Similarity %"] = [max(0.0, round(100.0 * (1.0 - (d / 3.5)), 1)) for d in result["Distance"]]
 
     # 3. Explainability: Top contributing domain
     match_positions = [position for _, position in ordered]
@@ -188,7 +202,7 @@ def find_similar_schools(
         chosen_values, tuple(effective_domains), means_dict, stds_dict, dominant_domain, target_cmi=1.0
     )
 
-    # 5. Statutory Federal Grant Crosswalk
+    # This is a navigation aid only; a domain score cannot establish program eligibility.
     grant_map = {
         "Crime": "Title IV, Part A (Student Support & Academic Enrichment) & BJA STOP School Violence Act",
         "Housing": "McKinney-Vento Homeless Assistance Act",
@@ -196,38 +210,38 @@ def find_similar_schools(
         "Health": "HRSA School-Based Health Center Program",
         "Education": "Title III English Language Acquisition & Academic Achievement",
     }
-    grant_program = grant_map.get(dominant_domain, "Title I Comprehensive Support & Improvement")
+    grant_program = grant_map.get(dominant_domain, "Explore federal and local program directories")
 
-    # 6. Generate Deterministic Statutory Grant Evidence Brief
+    # 6. Generate a deterministic, explicitly caveated profile summary
     peer_bullet_list = "\n".join([
         f"- {r['Name']} ({r['City']}, {r['State']}) | Distance: {r['Distance']:.3f} | Top Driver: {r['Top contributing domain']}"
         for _, r in result.iterrows()
     ])
     brief_text = f"""================================================================================
-STATEMENT OF DEMONSTRATED NEED & STATUTORY BENCHMARK REPORT
+EXPLORATORY SCHOOL PROFILE COMPARISON
 Target Institution: {target['Name']} ({target['City']}, {target['State']})
-Record Identifier: {target_id} | NCESSCH: {target[IDENTIFIER]}
+Identity: school name and location (not a federal identifier)
 ================================================================================
 
-1. EXECUTIVE SUMMARY & COMPOSITE DECOMPOSITION
-While {target['Name']} carries an aggregate composite score of {target[COMPOSITE]},
-dimensional decomposition reveals an acute localized crisis concentrated in:
-DOMAIN: {dominant_domain.upper()} (Measured Score: {chosen_values[dominant_domain]}, Standardized Outlier: +{dominant_z}σ)
+1. DESCRIPTIVE DOMAIN PROFILE
+Composite score: {target[COMPOSITE]}. The highest cohort-relative domain z-score is
+{dominant_domain.upper()} (score: {chosen_values[dominant_domain]}, z: {dominant_z}σ).
 
-COMPOSITE MASKING INDEX (CMI): {cmi}σ
-A high CMI demonstrates that scalar composite indices mask extreme operational
-disparities, penalizing the school in conventional formula funding.
+Domain-profile spread (legacy metric name CMI): {cmi}σ. This is the standard deviation
+of selected domain z-scores; it describes dispersion only and does not demonstrate
+causal effects, unmet need, formula distortion, or funding consequences.
 
-2. EMPIRICAL SISTER-SCHOOL BENCHMARKS (k-NN Subspace Retrieval)
-In continuous standardized civic space, the following statistical twin institutions
-operate under equivalent multi-domain environmental profiles:
+2. NEAREST PROFILE RECORDS (k-NN Subspace Retrieval)
+The following schools have the smallest standardized Euclidean distances in this
+selected profile space. These are exploratory comparisons, not validated twins:
 {peer_bullet_list}
 
-3. STATUTORY LEGISLATIVE ALLOCATION
-Under federal administrative guidelines, this empirical profile qualifies for:
-RECOMMENDED GRANT PROGRAM: {grant_program}
+3. PROGRAM AREA TO RESEARCH
+Potential reference area based on the highest relative domain: {grant_program}.
+This is not legal, funding, or eligibility advice. Confirm criteria and evidence with
+the administering agency before using any program reference.
 ================================================================================
-Generated via STEER (Statistical Twins for Educational Equity & Resources) | CDC 2026
+Generated via STEER, a CDC @ UNC datathon prototype.
 """
 
     location_parts = []
@@ -250,6 +264,7 @@ def find_positive_deviants(
     frame: pd.DataFrame,
     target_id: str,
     k: int = 3,
+    state: str | None = None,
 ) -> pd.DataFrame:
     """Finds mentor schools facing matching community headwinds with superior education scores."""
     headwind_domains = ["Economic", "Health", "Housing", "Crime"]
@@ -257,12 +272,15 @@ def find_positive_deviants(
     all_needed = headwind_domains + [outcome_domain]
 
     # Coerce to numeric FIRST so empty strings ("") become NaN before complete-case filtering
-    numeric = frame.loc[:, all_needed].apply(pd.to_numeric, errors="coerce")
+    source = frame.copy(deep=False)
+    if state:
+        source = source.loc[source["State"].astype(str).str.strip().str.casefold() == state.strip().casefold()]
+    numeric = source.loc[:, all_needed].apply(pd.to_numeric, errors="coerce")
     complete = numeric.notna().all(axis=1)
-    pool = frame.loc[complete].copy().reset_index(drop=True)
+    pool = source.loc[complete].copy().reset_index(drop=True)
     numeric = numeric.loc[complete].copy().reset_index(drop=True)
 
-    identity_column = RECORD_KEY if RECORD_KEY in pool.columns else IDENTIFIER
+    identity_column = RECORD_KEY
     target_rows = pool.loc[
         pool[identity_column].astype(str).str.strip() == str(target_id).strip()
     ]
@@ -316,7 +334,7 @@ def get_systemic_masking_leaderboard(
     state: str | None = None,
     n: int = 10,
 ) -> pd.DataFrame:
-    """Ranks schools by Composite Masking Index (CMI) to expose systemic algorithmic distortion."""
+    """Ranks rows by selected-domain z-score spread for exploratory profile review."""
     pool = frame.copy()
     if state and state != "Nationwide":
         pool = pool.loc[pool["State"].astype(str).str.strip().str.casefold() == state.strip().casefold()]
@@ -328,20 +346,20 @@ def get_systemic_masking_leaderboard(
         return pd.DataFrame()
 
     means = numeric.mean()
-    stds = numeric.std().replace(0, 1.0)
+    stds = numeric.std(ddof=0).replace(0, 1.0)
     z = (numeric - means) / stds
 
-    pool["CMI (σ)"] = z.std(axis=1).round(2)
-    pool["Dominant Crisis"] = z.idxmax(axis=1)
-    pool["Outlier (σ)"] = z.max(axis=1).round(2)
+    pool["Domain-profile spread (σ)"] = z.std(axis=1, ddof=0).round(2)
+    pool["Highest relative domain"] = z.idxmax(axis=1)
+    pool["Highest relative z (σ)"] = z.max(axis=1).round(2)
 
-    top = pool.sort_values(by="CMI (σ)", ascending=False).head(n)
-    cols = ["Name", "City", "State", COMPOSITE, "CMI (σ)", "Dominant Crisis", "Outlier (σ)", *domains]
+    top = pool.sort_values(by="Domain-profile spread (σ)", ascending=False).head(n)
+    cols = ["Name", "City", "State", COMPOSITE, "Domain-profile spread (σ)", "Highest relative domain", "Highest relative z (σ)", *domains]
     return top[[c for c in cols if c in top.columns]].reset_index(drop=True)
 
 
 def synthesize_llm_grant_narrative(result: SearchResult, target_row: pd.Series) -> str:
-    """Generates an executive policy narrative via an LLM, falling back cleanly to the statutory brief."""
+    """Draft a caveated descriptive summary with an optional LLM; never assert eligibility."""
     key = os.environ.get("OPENAI_API_KEY")
     if not key:
         return result.brief_text
@@ -350,21 +368,21 @@ def synthesize_llm_grant_narrative(result: SearchResult, target_row: pd.Series) 
         from openai import OpenAI
         client = OpenAI(api_key=key)
         prompt = f"""
-You are a federal educational grant director drafting an urgent Statement of Demonstrated Need.
-Rely STRICTLY on the empirical data provided below. Do not fabricate programs, metrics, or citations.
+Write a concise, neutral summary of exploratory school-profile calculations.
+Do not infer causes, school performance, need, intervention effects, funding eligibility,
+legal conclusions, or program suitability. Do not invent facts or citations. State that
+similarity and score adjustments are descriptive and require independent validation.
 
 TARGET INSTITUTION: {target_row['Name']} ({target_row['City']}, {target_row['State']})
 COMPOSITE HARDSHIP SCORE: {target_row[COMPOSITE]} / 100
-DOMINANT CIVIC CRISIS: {result.dominant_domain} (+{result.dominant_z}σ national outlier)
-COMPOSITE MASKING INDEX (CMI): {result.cmi}σ (severe dimensional distortion)
-STATUTORY GRANT PROGRAM TARGET: {result.grant_program}
-STATISTICAL TWIN BENCHMARK PEERS:
+Highest relative selected domain: {result.dominant_domain} ({result.dominant_z:+.2f}σ in this comparison cohort)
+Domain-profile spread (standard deviation of selected domain z-scores): {result.cmi}σ
+Potential program reference for independent research: {result.grant_program}
+Nearest comparison records:
 {result.matches[['Name', 'State', 'Distance', 'Top contributing domain']].head(3).to_string(index=False)}
 
-Compose a concise, high-impact 3-paragraph executive grant narrative:
-Paragraph 1: Deconstruct why the school's composite rating masks its acute operational emergency in {result.dominant_domain}.
-Paragraph 2: Cite the statistical twin cohort as empirical proof that distress is driven by macro-environmental determinants.
-Paragraph 3: State the statutory request under {result.grant_program} to deliver immediate targeted capital.
+Include a short final sentence: "This exploratory output is not a funding recommendation
+or eligibility determination; verify all source data and program requirements independently."
 """
         response = client.chat.completions.create(
             model="gpt-4o-mini",

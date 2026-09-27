@@ -1,63 +1,42 @@
-# STEER: Statistical Twins for Educational Equity & Resources
+# STEER: explore school community profiles
 
-**Carolina Data Challenge 2026** | Track: AI for Social Good / Social Sciences
+STEER is a Streamlit prototype for descriptive comparisons of community stress profiles around U.S. public schools. It keeps the three-tab interface and analysis ideas from the `feat/steer-update` branch: nearest-profile search, profile comparisons, a domain-spread leaderboard, and a hypothetical score-adjustment control. The school search updates suggestions as the user types.
 
-STEER is an in-memory spatial retrieval engine that exposes and resolves **"The Composite Trap"**—where aggregate municipal hardship indices mask acute, localized civic crises across public schools.
+The app identifies a record by the source school name, city, state, and district (or county when district is unavailable). It does not read or use NCESSCH. Exact duplicate name/location/profile rows are collapsed. If one name/location key has conflicting score profiles, loading stops rather than choosing a record silently.
 
-By decomposing multi-domain community stress into standardized continuous vectors, STEER identifies empirical **statistical twin schools** across district and state borders, isolates acute crisis drivers via the **Composite Masking Index (CMI)**, simulates targeted relief via an algorithmic **Tipping Point Solver**, and deterministically synthesizes audit-ready statutory federal grant briefs in under 15 milliseconds.
-
----
-
-## The Problem: The Composite Trap
-
-State and federal education agencies distribute billions in targeted funding using aggregate 0–100 distress scores. This scalar compression creates false equivalencies between institutions facing diametrically opposed challenges:
-
-| Dimension | Northeast Regional Biotech (Jamesville, NC) | D.H. Conley High (Greenville, NC) | Civic Divergence |
-| :--- | :---: | :---: | :--- |
-| **Composite Hardship Score** | **34** | **34** | **Identical Aggregate (0-point gap)** |
-| **Safety / Crime Index** | **57** | **39** | **+18 pts Biotech** (Severe community safety crisis) |
-| **Economic Vulnerability** | **46** | **34** | **+12 pts Biotech** (High economic isolation) |
-| **Housing Instability** | **19** | **41** | **+22 pts Conley** (Severe student housing distress) |
-| **Health Stress** | **28** | **36** | **+8 pts Conley** (Community health deficit) |
-
-Under conventional funding formulas, both schools receive identical intervention packages. STEER decomposes these vectors to route capital where the crisis actually exists.
-
----
-
-## Key Methodological Innovations
-
-1. **Composite Masking Index (CMI):** Quantifies the degree to which an aggregate scalar obscures dimensional variance:
-   $$\text{CMI} = \sqrt{\frac{1}{d} \sum_{j=1}^{d} (z_j - \bar{z})^2} = \sigma(\mathbf{z})$$
-   A high CMI indicates severe dimensional imbalance, flagging institutions penalized by aggregate formula funding.
-2. **Algorithmic Tipping Point Solver:** Uses a binary search solver to determine the exact minimum point reduction needed in the dominant crisis domain to normalize a school's CMI below $1.0\sigma$.
-3. **Out-of-Sample Subspace $k$-NN:** Fits `StandardScaler` strictly across candidate pools, transforming queries without data leakage. Missing features are handled via dynamic subspace projection rather than global listwise deletion.
-4. **Positive Deviance Retrieval:** Rather than only matching schools facing equivalent distress, STEER isolates operational mentors—institutions facing identical external community headwinds that have achieved superior educational attainment.
-5. **Grounded LLM Grant Copilot:** Feeds verified mathematical outputs ($z$-scores, CMI, twin benchmarks, statutory targets) into a grounded prompt with a deterministic fallback, preventing hallucination while synthesizing an executive-level Statement of Need.
-
----
-
-## Architecture & Visual Stack
-
-* **Presentation Layer:** Streamlit with Plotly Graph Objects rendering 3-way stress radar topologies (`go.Scatterpolar`).
-* **Analytical Engine:** In-memory execution via NumPy and Scikit-learn (`NearestNeighbors`, `StandardScaler`).
-* **Inference Latency:** $<15\text{ ms}$ per end-to-end multi-domain query across 23,599 institutions with zero external API dependencies.
-
----
-
-## Installation & Local Execution
-
-Ensure Python 3.11+ is installed. From the project root:
+## Run locally
 
 ```bash
-# 1. Activate virtual environment
+python -m venv .venv
 source .venv/bin/activate
-
-# 2. Install pinned dependencies
 python -m pip install -r requirements.txt
-
-# 3. Run validation test suite
-python -m pytest
-
-# 4. Launch STEER
 streamlit run app.py
 ```
+
+The app reads `Data/index_scores_v3_2026.csv` relative to the repository. Set `STEER_DATA_PATH` to use another CSV. The app and `clean_data.py` are read-only; they do not rewrite source data.
+
+For the optional generated summary, set `OPENAI_API_KEY`. Without a key, the deterministic text summary is used. The generated text is still exploratory and should be checked before reuse.
+
+## Tests
+
+```bash
+python -m pip install -r requirements-test.txt
+pytest -q
+```
+
+Tests cover name/location identity, duplicate and ambiguous profiles, missing data, distance ordering and self-exclusion, geographic filters, retained analysis features, typeahead search behavior, and app startup.
+
+## How to read the analysis
+
+- Search uses complete records for the selected domains. Candidate rows missing any selected score are excluded and counted; no imputation is performed. A selected school missing a selected score is reported as an error.
+- Candidate scores are standardized within the filtered candidate pool. The app returns Euclidean distance in that standardized feature space; it is not a calibrated percentage or probability.
+- “Domain-profile spread” is the standard deviation of a school's selected domain z-scores. It is a descriptive dispersion metric (the legacy code called it CMI). It does not establish unmet need, causal effects, composite-score bias, or funding consequences.
+- The hypothetical score-adjustment control changes an input score mathematically. It does not estimate an intervention's effect or show that a real school can achieve that change.
+- The profile-comparison tab finds nearby records on the four non-Education domains and shows those with higher Education scores. This does not identify effective practices or demonstrate why scores differ.
+- A program name shown in the summary is a reference to research further, not a grant recommendation or eligibility determination. Verify current program rules independently.
+
+## Data context
+
+The bundled source documentation describes the Open Data Index for Schools (ODIS), v1, by Hawken, Minar, Choudhary, and Kulick (2026), DOI [10.7281/T170WN53](https://doi.org/10.7281/T170WN53). Refer to `Data/ODIS README v3.pdf` and `Data/ODIS Technical Report March 2026.pdf` for definitions and limitations.
+
+ODIS scores describe community stress indicators synthesized to School Attendance Boundaries. Higher scores indicate more stressful community conditions; they are not measures of school performance. Underlying measures use different sources, geographies, and reference years.

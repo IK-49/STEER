@@ -1,0 +1,148 @@
+STEER · CDC @ UNC datathon presentation notes
+================================================
+
+Three-minute demo. The framing is deliberate: this is a descriptive school
+community-profile explorer, not a funding, intervention, or school-quality
+decision system.
+
+THREE-MINUTE SCRIPT
+-------------------
+
+0:00–0:35 | The question
+
+“A single composite score can summarize a lot of information, but it cannot
+show every difference among domains. STEER lets a user inspect a selected
+school’s five ODIS community-stress scores and find records that are nearby in
+the chosen standardized feature space.”
+
+“Our source’s federal school identifier field is unreliable for this use, so
+we do not load it. We identify a record by school name, city, state, and
+district, falling back to county if district is missing. Exact duplicate
+profiles collapse; conflicting profiles with the same name/location key stop
+with an error instead of being guessed.”
+
+0:35–1:35 | Live demo
+
+“I can type a school name and see the matching suggestions update immediately.
+I’ll select Northeast Regional, choose domains, and set the geographic scope.
+STEER standardizes each selected score over the candidate pool and ranks the
+K smallest Euclidean distances. The table shows the raw distance and the
+largest per-domain contribution to that distance.”
+
+“If a candidate is missing a selected score, it is left out of that search
+and counted. We do not impute. The state filter changes the candidate pool,
+so it can change both the standardization and the nearest records.”
+
+“The other tabs preserve Izad’s profile-comparison and domain-spread ideas.
+One compares nearby community profiles with higher Education scores; that is
+an observed association, not evidence of effective practice or causation.
+The leaderboard ranks spread across selected domain z-scores. It does not
+rank need or show that a composite score is biased.”
+
+“The what-if control changes a score mathematically to show how the spread
+metric responds. It does not predict what a real intervention would do. The
+program reference is a starting point for independent research, not a grant
+recommendation or eligibility decision.”
+
+1:35–2:20 | Method and limits
+
+“ODIS is the Open Data Index for Schools. Its domain scores describe
+community-stress indicators synthesized to School Attendance Boundaries.
+They are not school performance scores. The source report describes measures
+from different source years, geographies, and underlying datasets.”
+
+“The legacy CMI is the standard deviation of a selected school’s domain
+z-scores relative to this search’s candidate pool. We call it domain-profile
+spread because that is what it calculates. The result changes with the chosen
+domains and candidate pool; it is not an established measure of harm, equity,
+or formula distortion.”
+
+“Distance is not a percentage or probability. Standardization puts features
+on comparable numeric scales for this calculation; it does not make their
+policy meanings interchangeable.”
+
+2:20–3:00 | Close
+
+“STEER is a transparent exploratory prototype that keeps the calculation
+visible. A responsible next step is to ask data owners and school-community
+stakeholders whether the identity rules, peer comparisons, and missing-data
+policy are useful for a real decision. We would validate that before making
+recommendations or building collaboration workflows.”
+
+DEMO CUES
+---------
+
+1. Type “D H Conley” to show that suggestions respond to search text.
+2. Switch to “Northeast Regional” and show its selected community scores.
+3. Point to the geographic scope and domain selectors, then to raw distance
+   and largest distance contribution.
+4. Open the profile-comparison tab and describe it as association only.
+5. Open the spread leaderboard and explain that it is not a need ranking.
+6. Expand the hypothetical score control and explicitly say it is not an
+   intervention-effect estimate.
+7. Mention that the downloadable summary is descriptive and caveated.
+
+LIKELY JUDGE QUESTIONS
+----------------------
+
+Q: Why not repair or use NCESSCH?
+A: We could not reliably recover that field from this source. This version
+   deliberately does not read it. Its key uses source name and location text.
+   That avoids the damaged field, but it cannot guarantee a globally unique
+   identity. Conflicting profiles on the same key stop loading; a future
+   production system needs a trusted identity crosswalk.
+
+Q: How is a school with the same name distinguished?
+A: By city, state, and district, with county as a fallback when district is
+   absent. If the remaining key maps to different profiles, we report the
+   ambiguity and do not choose one.
+
+Q: What does the nearest school mean?
+A: It has a small Euclidean distance after standardizing the selected domain
+   scores across the candidate set. This only means the measured values are
+   close under these features and this scope. It says nothing about causes,
+   outcomes, or transferable programs.
+
+Q: Why does changing state change distances?
+A: The candidate pool is filtered first, and StandardScaler is fit on that
+   pool. Different pools have different means and standard deviations. That
+   makes the comparison local to the chosen search context.
+
+Q: What is the CMI / domain-profile spread?
+A: The population standard deviation of the target’s selected domain
+   z-scores, relative to the candidate pool. We retained the calculation as
+   an exploratory summary but do not treat it as a validated equity metric.
+
+Q: Can I use the score adjustment to estimate the impact of a policy?
+A: No. It changes a score input and recomputes the descriptive metric. It has
+   no treatment model, counterfactual, or causal identification strategy.
+
+Q: Why show program names?
+A: The legacy feature links the highest relative domain to a possible area
+   for further research. It is not an eligibility check or funding
+   recommendation. Program rules and school-level facts are outside this
+   dataset and must be independently verified.
+
+Q: What does the positive-deviance tab show?
+A: It looks for records nearby on Economic, Health, Housing, and Crime scores
+   that have higher Education scores. It does not observe practices, explain
+   the difference, or prove that one school is a mentor.
+
+CLAIMS TO AVOID
+--------------
+
+- Do not say the nearest records are validated twins or causal comparators.
+- Do not call profile spread a proven measure of inequity, crisis, or masking.
+- Do not say the what-if solver predicts an intervention or policy effect.
+- Do not say STEER establishes grant fit, eligibility, or allocation.
+- Do not describe ODIS neighborhood measures as school performance scores.
+- Do not call a higher Education score evidence of best practice.
+- Do not present distance as a calibrated percentage or probability.
+
+SOURCE NOTES
+------------
+
+The bundled source documentation cites Hawken, Angela; Minar, Nicholas;
+Choudhary, Raj; and Kulick, Jonathan (2026), “Open Data Index for Schools
+(ODIS),” DOI 10.7281/T170WN53. See `Data/ODIS README v3.pdf` and `Data/ODIS
+Technical Report March 2026.pdf`.
