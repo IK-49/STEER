@@ -22,8 +22,8 @@ close together really be?** We used school attendance boundary (SAB) data to exp
 that question.
 
 First, we compared composite scores. That showed us variation, but it also raised a
-second question: **can the same composite hide very different underlying profiles?**
-The Arizona example below shows why we looked beyond one number.
+second question: **can similar composites hide very different underlying profiles?**
+The Yuma example below shows why we looked beyond one number.
 """)
 
 try:
@@ -61,32 +61,34 @@ else:
     fig.update_layout(xaxis_title="Composite score", yaxis_title="Within-profile spread (σ)")
     st.plotly_chart(fig, width="stretch")
 
-st.header("2 · Similar composites can hide different profiles")
+st.header("2 · Similar composites, very different profiles")
 left, right = st.columns([1, 1.2])
 with left:
     st.markdown("""
-    **Arizona example from this dataset**
+    **Two schools in Yuma Union High School District**
 
-    - Accelerated Learning Center · Phoenix
-    - Buena High School · Sierra Vista
-    - Both have a composite score of **20**
-    - Their five domain scores differ across the profile
+    - Gila Ridge High School · Yuma
+    - San Luis High School · San Luis
+    - Composite scores: **36** and **42** (six points apart)
+    - Same district; San Luis is about 20 miles from Yuma, according to the [district history](https://www.yumaunion.org/welcome/welcome/our-history)
 
-    The composite alone makes these records look alike. Comparing the five scores
-    shows what the summary leaves out. That does not mean the records are otherwise
-    interchangeable or that the domain values explain why they differ.
+    The composite scores look close, but the underlying community profiles do not:
+    Education is **29 vs. 90**, and Housing is **55 vs. 6**. The district and the
+    similar composite do not tell the whole story. These scores describe community
+    conditions associated with school attendance boundaries, not school performance.
     """)
 with right:
-    pair_names = ["Accelerated Learning Center", "Buena High School"]
+    pair_names = ["Gila Ridge High School", "San Luis High School"]
     pair = schools.loc[schools["Name"].isin(pair_names)].copy()
     if len(pair) == 2:
+        pair["Name"] = pd.Categorical(pair["Name"], categories=pair_names, ordered=True)
         long = pair.melt(id_vars=["Name", "City", COMPOSITE], value_vars=list(DOMAINS), var_name="Domain", value_name="Score")
-        long["School"] = long["Name"] + " · " + long["City"]
-        fig = px.bar(long, x="Domain", y="Score", color="School", barmode="group", title="Same composite (20), different five-score profiles")
+        long["School"] = long["Name"].astype(str) + " · " + long["City"]
+        fig = px.bar(long, x="Domain", y="Score", color="School", barmode="group", title="Composite scores 6 points apart, contrasting five-score profiles")
         st.plotly_chart(fig, width="stretch")
-        st.dataframe(pair[["Name", "City", COMPOSITE, *DOMAINS]], hide_index=True, width="stretch")
+        st.dataframe(pair[["Name", "City", "School District", COMPOSITE, *DOMAINS]], hide_index=True, width="stretch")
     else:
-        st.warning("The Arizona example could not be matched in the loaded data. Confirm school names before presenting.")
+        st.warning("The Yuma example could not be matched in the loaded data. Confirm school names before presenting.")
 
 st.header("3 · From one-number ranking to profile comparison")
 st.markdown("""
