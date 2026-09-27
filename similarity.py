@@ -146,7 +146,11 @@ def find_similar_schools(
     if not effective_domains:
         raise SearchError("No selected domains have values for the target. Enter a score or select a domain with data.")
 
-    pool = frame.copy(deep=True)
+    # PERF: no need to deep-copy the whole dataset here. Every branch below
+    # reassigns `pool` via `.loc[...].copy()`, and the target-exclusion step a
+    # few lines down does this unconditionally before anything is mutated, so
+    # the original `frame` is never touched regardless of this alias.
+    pool = frame
     if state:
         pool = pool.loc[pool["State"].astype(str).str.strip().str.casefold() == state.strip().casefold()].copy()
     if county and "County" in pool:
