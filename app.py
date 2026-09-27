@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import textwrap
+
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
@@ -104,6 +106,9 @@ search_columns = ("Name", "City", "State")
 mask = pd.Series(False, index=schools.index)
 for column in search_columns:
     mask |= schools[column].astype("string").str.casefold().str.contains(needle, regex=False, na=False)
+# BUGFIX: count the true number of matches BEFORE truncating to 250,
+# and report that count (not len() on it -- it's already an int).
+total_matches = int(mask.sum())
 found = schools.loc[mask].head(250)
 
 if found.empty:
@@ -111,7 +116,7 @@ if found.empty:
     st.stop()
 
 suggestion_keys = found[RECORD_KEY].head(5).tolist()
-st.caption(f"{len(found):,} matching records · choose a suggestion")
+st.caption(f"{total_matches:,} matching records · choose a suggestion")
 selected_id = st.pills(
     "Matching schools", suggestion_keys,
     selection_mode="single",
@@ -147,10 +152,16 @@ except SearchError as exc:
 # Top KPI Metric Cards
 st.markdown("---")
 m1, m2, m3, m4 = st.columns(4)
-m1.metric("Composite score", f"{target[COMPOSITE]} / 100", "Source value")
+m1.metric("Composite score", f"{target[COMPOSITE]:.1f} / 100", "Source value")
 m2.metric("Highest relative domain", result.dominant_domain.upper(), f"{result.dominant_z:+.2f}σ in selected cohort")
 m3.metric("Domain-profile spread", f"{result.cmi} σ", "Spread of selected domain z-scores")
-m4.metric("Program area to research", result.grant_program.split("&")[0][:26], "Not an eligibility finding")
+m4.metric(
+    "Program area to research",
+    # BUGFIX: word-boundary-aware truncation instead of a raw character slice,
+    # which could previously cut a program name mid-word (e.g. "...Health C").
+    textwrap.shorten(result.grant_program.split("&")[0].strip(), width=26, placeholder="…"),
+    "Not an eligibility finding",
+)
 st.markdown("---")
 st.caption(
     f"Scope: {result.scope_description} · {len(result.domains)} selected domains · "
@@ -208,8 +219,14 @@ with tab1:
     st.caption("Compare selected source scores with nearby points in the standardized feature space.")
 
     # 1-Click "Composite Trap" Parity Toggle
-    conley_matches = schools[schools["Name"].str.contains("D H Conley", case=False, na=False)]
-    conley_available = not conley_matches.empty and target["Name"] != conley_matches.iloc[0]["Name"]
+    # BUGFIX: match on the record identity key (name + city + state + district/county),
+    # not just Name, so a same-named school in a different state can't be picked up
+    # as the "D.H. Conley (NC)" comparison record.
+    conley_matches = schools[
+        schools["Name"].str.contains("D H Conley", case=False, na=False)
+        & schools["State"].astype(str).str.strip().str.casefold().eq("nc")
+    ]
+    conley_available = not conley_matches.empty and target[RECORD_KEY] != conley_matches.iloc[0][RECORD_KEY]
 
     if conley_available:
         show_trap_overlay = st.checkbox(
@@ -222,43 +239,60 @@ with tab1:
 
     if len(result.matches) > 0:
         closest_peer = result.matches.iloc[0]
-        cats = list(result.domains) + [result.domains[0]]
-        t_vals = [result.target_values[d] for d in result.domains] + [result.target_values[result.domains[0]]]
-        p_vals = [float(closest_peer[d]) for d in result.domains] + [float(closest_peer[result.domains[0]])]
-        b_vals = [float(result.means.get(d, 0.0)) for d in result.domains] + [float(result.means.get(result.domains[0], 0.0))]
 
-        fig_radar = go.Figure()
-        fig_radar.add_trace(go.Scatterpolar(
-            r=t_vals, theta=cats, fill="toself",
-            name=f"Target: {target['Name'][:20]} ({target[COMPOSITE]})", line=dict(color="#EA580C", width=3),
-            fillcolor="rgba(234, 88, 12, 0.2)",
-        ))
-        fig_radar.add_trace(go.Scatterpolar(
-            r=p_vals, theta=cats, fill="toself",
-            name=f"Nearest profile: {closest_peer['Name'][:20]}", line=dict(color="#0284C7", width=2.5),
-            fillcolor="rgba(2, 132, 199, 0.2)",
-        ))
-        fig_radar.add_trace(go.Scatterpolar(
-            r=b_vals, theta=cats,
-            name="Candidate mean", line=dict(color="#64748B", width=1.5, dash="dash"),
-        ))
+        if len(result.domains) < 2:
+            # BUGFIX: a radar/polar chart with a single repeated category is a
+            # degenerate shape (a sliver/point) and isn't a useful visual.
+            # Fall back to a plain comparison for the single selected domain.
+            single_domain = result.domains[0]
+            st.info(
+                "The profile radar needs at least two active domains to draw a shape. "
+                "Select more than one domain in the sidebar to see it. Showing the "
+                f"single **{single_domain}** value instead:"
+            )
+            st.metric(
+                f"{single_domain} — target vs. nearest peer vs. candidate mean",
+                f"{result.target_values[single_domain]:.1f}",
+                f"peer {float(closest_peer[single_domain]):.1f} · mean {result.means.get(single_domain, 0.0):.1f}",
+            )
+        else:
+            cats = list(result.domains) + [result.domains[0]]
+            t_vals = [result.target_values[d] for d in result.domains] + [result.target_values[result.domains[0]]]
+            p_vals = [float(closest_peer[d]) for d in result.domains] + [float(closest_peer[result.domains[0]])]
+            b_vals = [float(result.means.get(d, 0.0)) for d in result.domains] + [float(result.means.get(result.domains[0], 0.0))]
 
-        if show_trap_overlay and conley_available:
-            conley_row = conley_matches.iloc[0]
-            c_vals = [float(conley_row[d]) for d in result.domains] + [float(conley_row[result.domains[0]])]
+            fig_radar = go.Figure()
             fig_radar.add_trace(go.Scatterpolar(
-                r=c_vals, theta=cats, fill="toself",
-                name=f"Comparison: {conley_row['Name'][:20]}", line=dict(color="#9333EA", width=2.5, dash="dot"),
-                fillcolor="rgba(147, 51, 234, 0.15)",
+                r=t_vals, theta=cats, fill="toself",
+                name=f"Target: {target['Name'][:20]} ({target[COMPOSITE]})", line=dict(color="#EA580C", width=3),
+                fillcolor="rgba(234, 88, 12, 0.2)",
+            ))
+            fig_radar.add_trace(go.Scatterpolar(
+                r=p_vals, theta=cats, fill="toself",
+                name=f"Nearest profile: {closest_peer['Name'][:20]}", line=dict(color="#0284C7", width=2.5),
+                fillcolor="rgba(2, 132, 199, 0.2)",
+            ))
+            fig_radar.add_trace(go.Scatterpolar(
+                r=b_vals, theta=cats,
+                name="Candidate mean", line=dict(color="#64748B", width=1.5, dash="dash"),
             ))
 
-        fig_radar.update_layout(
-            polar=dict(radialaxis=dict(visible=True, range=[0, 100], tickfont=dict(size=11, color="#64748B"))),
-            font=dict(family="sans-serif", size=13),
-            legend=dict(orientation="h", yanchor="bottom", y=1.06, xanchor="center", x=0.5),
-            height=460, margin=dict(l=40, r=40, t=40, b=20),
-        )
-        st.plotly_chart(fig_radar, width="stretch")
+            if show_trap_overlay and conley_available:
+                conley_row = conley_matches.iloc[0]
+                c_vals = [float(conley_row[d]) for d in result.domains] + [float(conley_row[result.domains[0]])]
+                fig_radar.add_trace(go.Scatterpolar(
+                    r=c_vals, theta=cats, fill="toself",
+                    name=f"Comparison: {conley_row['Name'][:20]}", line=dict(color="#9333EA", width=2.5, dash="dot"),
+                    fillcolor="rgba(147, 51, 234, 0.15)",
+                ))
+
+            fig_radar.update_layout(
+                polar=dict(radialaxis=dict(visible=True, range=[0, 100], tickfont=dict(size=11, color="#64748B"))),
+                font=dict(family="sans-serif", size=13),
+                legend=dict(orientation="h", yanchor="bottom", y=1.06, xanchor="center", x=0.5),
+                height=460, margin=dict(l=40, r=40, t=40, b=20),
+            )
+            st.plotly_chart(fig_radar, width="stretch")
 
     if show_trap_overlay and conley_available:
         st.info("These profiles illustrate differences among source dimensions. They do not establish school need, funding formulas, or suitable interventions.")
@@ -321,10 +355,10 @@ with col_brief_btn:
         file_name=f"STEER_Profile_Summary_{target['Name'].replace(' ', '_')}.txt",
         mime="text/plain",
     )
+    
+with col_brief_ai:
+    if st.button("✨ Draft descriptive summary with AI"):
+        with st.spinner("Drafting a descriptive summary…"):
+            brief_display = synthesize_llm_grant_narrative(result, target)
 
-brief_display = result.brief_text
-if st.button("✨ Draft descriptive summary with AI"):
-    with st.spinner("Drafting a descriptive summary…"):
-        brief_display = synthesize_llm_grant_narrative(result, target)
-
-    st.text_area("Profile summary preview:", brief_display, height=220)
+        st.text_area("Profile summary preview:", brief_display, height=220)
