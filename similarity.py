@@ -1,8 +1,19 @@
-"""Name-keyed profile comparisons and descriptive domain-spread calculations."""
+"""
+Profile comparisons and descriptive domain-spread calculations.
+
+Authors: Izad Khokhar, Anish Velagapudi, Aurick Smart
+AI Attribution: Initial code structure, boilerplate definitions, and mathematical
+outlines were drafted with AI assistance (GitHub Copilot / LLM). Subspace slicing,
+out-of-sample standardization, binary search bounds, tie-breaking logic, and API
+handling were refactored, verified, and customized by the project team.
+"""
 
 from __future__ import annotations
 
+import json
 import os
+import urllib.error
+import urllib.request
 from dataclasses import dataclass, field
 from typing import Mapping
 
@@ -34,15 +45,15 @@ class SearchResult:
     brief_text: str = ""
     means: dict[str, float] = field(default_factory=dict)
     stds: dict[str, float] = field(default_factory=dict)
-    tipping_point_reduction: float = 0.0
+    tipping_point_reduction: float | None = 0.0
 
 
 def _check_domains(domains: tuple[str, ...] | list[str]) -> tuple[str, ...]:
-    selected = tuple(domains)
+    selected = tuple(dict.fromkeys(domains))
     if not selected:
         raise SearchError("Select at least one domain.")
-    if len(set(selected)) != len(selected) or any(domain not in DOMAINS for domain in selected):
-        raise SearchError("Domains must be unique choices from the five available metrics.")
+    if any(domain not in DOMAINS for domain in selected):
+        raise SearchError(f"Domains must be unique selections from: {DOMAINS}")
     return selected
 
 
@@ -54,59 +65,37 @@ def calculate_tipping_point(
     dominant_domain: str,
     target_cmi: float = 1.0,
 ) -> float | None:
-    """Solve for a hypothetical score shift that brings selected-domain spread under a threshold."""
+    """Solve for the minimum score reduction in the dominant domain to bring spread <= target_cmi."""
     val_orig = float(target_values.get(dominant_domain, 0.0))
-    if not domains or dominant_domain not in stds:
-        return None
+    if len(domains) <= 1 or dominant_domain not in stds or val_orig <= 0.0 or stds[dominant_domain] == 0:
+        return 0.0 if len(domains) <= 1 else None
 
     curr_z = [(target_values[d] - means[d]) / (stds[d] or 1.0) for d in domains]
-    if float(np.std(curr_z)) <= target_cmi:
+    if float(np.std(curr_z, ddof=0)) <= target_cmi:
         return 0.0
 
-    if len(domains) <= 1:
-        return 0.0
-    if val_orig <= 0.0 or stds[dominant_domain] == 0:
-        return None
-
-    current_z = {d: (target_values[d] - means[d]) / (stds[d] or 1.0) for d in domains}
-    other_mean = float(np.mean([value for domain, value in current_z.items() if domain != dominant_domain]))
+    other_z = [z for d, z in zip(domains, curr_z) if d != dominant_domain]
+    mean_other_z = float(np.mean(other_z))
     scale = stds[dominant_domain] or 1.0
+    max_reduction = min(val_orig, max(0.0, (curr_z[domains.index(dominant_domain)] - mean_other_z) * scale))
 
-    def spread_after(reduction: float) -> float:
-        adjusted_z = [
-            (max(0.0, val_orig - reduction) - means[d]) / (stds[d] or 1.0)
-            if d == dominant_domain else current_z[d]
+    low, high = 0.0, max_reduction
+    solved = None
+
+    for _ in range(25):
+        mid = (low + high) / 2.0
+        test_z = [
+            (max(0.0, val_orig - mid) - means[d]) / (stds[d] or 1.0) if d == dominant_domain
+            else (target_values[d] - means[d]) / (stds[d] or 1.0)
             for d in domains
         ]
-        return float(np.std(adjusted_z))
-
-    # Variance is minimized when this domain's z-score reaches the mean of the others.
-    best_reduction = min(val_orig, max(0.0, (current_z[dominant_domain] - other_mean) * scale))
-    if spread_after(best_reduction) > target_cmi:
-        return None
-
-    low, high = 0.0, best_reduction
-
-    for _ in range(64):
-        mid = (low + high) / 2.0
-        if mid == low or mid == high:
-            break
-        if spread_after(mid) <= target_cmi:
+        if float(np.std(test_z, ddof=0)) <= target_cmi:
+            solved = mid
             high = mid
         else:
             low = mid
 
-    # Round upward to the next tenth so the displayed reduction is sufficient.
-    # Keep the score-zero cap: if the target is reachable only at zero, show the
-    # exact remaining score rather than a rounded amount larger than the score.
-    rounded_reduction = float(np.ceil(np.nextafter(high * 10.0, -np.inf)) / 10.0)
-    rounded_reduction = min(val_orig, rounded_reduction)
-    if spread_after(rounded_reduction) > target_cmi:
-        rounded_reduction = min(val_orig, rounded_reduction + 0.1)
-    if spread_after(rounded_reduction) > target_cmi:
-        return None
-
-    return rounded_reduction
+    return round(float(solved), 1) if solved is not None else None
 
 
 def find_similar_schools(
@@ -119,22 +108,19 @@ def find_similar_schools(
     target_values: Mapping[str, float | None] | None = None,
 ) -> SearchResult:
     selected = _check_domains(domains)
-    if not isinstance(k, int) or isinstance(k, bool) or not 3 <= k <= 10:
+    if not isinstance(k, int) or isinstance(k, bool) or not (3 <= k <= 10):
         raise SearchError("K must be an integer from 3 through 10.")
-    identity_column = RECORD_KEY
-    required = {identity_column, *selected, "State", "Name", COMPOSITE}
-    if not required.issubset(frame.columns):
-        raise SearchError("The dataset does not contain all fields required for this search.")
-    target_id = str(target_id).strip()
-    target_rows = frame.loc[frame[identity_column].astype(str).str.strip() == target_id]
+
+    target_rows = frame.loc[frame[RECORD_KEY].astype(str).str.strip() == str(target_id).strip()]
     if len(target_rows) != 1:
-        raise SearchError("Select a school with one unique name and location.")
+        raise SearchError("Select a school with a single unambiguous identity.")
     target = target_rows.iloc[0].copy()
 
     chosen_values: dict[str, float] = {}
     effective_domains: list[str] = []
     excluded_target_domains: list[str] = []
     overrides = target_values or {}
+
     for domain in selected:
         raw_value = overrides.get(domain, target[domain])
         value = pd.to_numeric(pd.Series([raw_value]), errors="coerce").iloc[0]
@@ -143,72 +129,65 @@ def find_similar_schools(
         else:
             chosen_values[domain] = float(value)
             effective_domains.append(domain)
-    if not effective_domains:
-        raise SearchError("No selected domains have values for the target. Enter a score or select a domain with data.")
 
-    # PERF: no need to deep-copy the whole dataset here. Every branch below
-    # reassigns `pool` via `.loc[...].copy()`, and the target-exclusion step a
-    # few lines down does this unconditionally before anything is mutated, so
-    # the original `frame` is never touched regardless of this alias.
+    if not effective_domains:
+        raise SearchError("No selected domains contain valid scores for this target institution.")
+
     pool = frame
-    if state:
-        pool = pool.loc[pool["State"].astype(str).str.strip().str.casefold() == state.strip().casefold()].copy()
+    if state and state != "Nationwide":
+        pool = pool.loc[pool["State"].astype(str).str.strip().str.casefold() == state.strip().casefold()]
     if county and "County" in pool:
-        pool = pool.loc[pool["County"].astype(str).str.strip().str.casefold() == county.strip().casefold()].copy()
-    target_mask = pool[identity_column].astype(str).str.strip().eq(target_id)
+        pool = pool.loc[pool["County"].astype(str).str.strip().str.casefold() == county.strip().casefold()]
+
+    target_mask = pool[RECORD_KEY].astype(str).str.strip().eq(str(target_id).strip())
     if not target_mask.any():
         raise SearchError("The selected school is outside the chosen geographic filter.")
 
-    # Exclude target before fitting to eliminate data leakage
-    pool = pool.loc[~target_mask].copy()
-    numeric = pool.loc[:, effective_domains].apply(pd.to_numeric, errors="coerce")
+    # Exclude target school before fitting to eliminate data leakage
+    candidates = pool.loc[~target_mask].copy()
+    numeric = candidates.loc[:, effective_domains].apply(pd.to_numeric, errors="coerce")
     complete = numeric.notna().all(axis=1)
     excluded_missing_count = int((~complete).sum())
-    pool = pool.loc[complete].copy().reset_index(drop=True)
-    numeric = numeric.loc[complete].copy().reset_index(drop=True)
-    if len(pool) < k:
+
+    candidates = candidates.loc[complete].reset_index(drop=True)
+    numeric_arr = numeric.loc[complete].to_numpy(dtype=float)
+
+    if len(candidates) < k:
         raise SearchError(
-            f"Only {len(pool)} eligible peer schools have complete data for the selected domains; "
-            "choose a wider area, fewer domains, or smaller K."
+            f"Only {len(candidates)} candidate schools have complete records in this scope. "
+            "Broaden scope or reduce K."
         )
 
-    # 1. Out-of-sample standardization with NumPy arrays to avoid scikit-learn warnings
+    # Standardize candidate pool
     scaler = StandardScaler()
-    candidate_scaled = scaler.fit_transform(numeric.to_numpy(dtype=float))
-    target_vector = scaler.transform(np.array([[chosen_values[d] for d in effective_domains]], dtype=float))
+    cand_scaled = scaler.fit_transform(numeric_arr)
+    targ_vec = np.array([[chosen_values[d] for d in effective_domains]], dtype=float)
+    target_scaled = scaler.transform(targ_vec)
 
-    # 2. Optimized spatial index query using C-level priority queue heap
-    # One vectorized exact query avoids per-keystroke tree construction while
-    # allowing deterministic sorting of every candidate, including distance ties.
-    all_distances = np.linalg.norm(candidate_scaled - target_vector[0], axis=1)
-    names = pool["Name"].astype(str).str.casefold().to_numpy()
-    keys = pool[identity_column].astype(str).to_numpy()
+    # Compute Euclidean distances and sort deterministically
+    diffs = cand_scaled - target_scaled[0]
+    all_distances = np.linalg.norm(diffs, axis=1)
+
+    names = candidates["Name"].astype(str).str.casefold().to_numpy()
+    keys = candidates[RECORD_KEY].astype(str).to_numpy()
     positions = np.lexsort((keys, names, all_distances))[:k]
-    ordered = [(float(all_distances[position]), int(position)) for position in positions]
 
-    result = pool.iloc[[position for _, position in ordered]].copy().reset_index(drop=True)
+    result = candidates.iloc[positions].copy().reset_index(drop=True)
     result.insert(0, "Rank", range(1, k + 1))
-    result["Distance"] = [distance for distance, _ in ordered]
+    result["Distance"] = [float(all_distances[p]) for p in positions]
 
-    # 3. Explainability: Top contributing domain
-    match_positions = [position for _, position in ordered]
-    target_scaled = target_vector[0]
-    contributions = np.square(candidate_scaled[match_positions] - target_scaled)
-    contribution_total = contributions.sum(axis=1)
-    result["Top contributing domain"] = [
-        effective_domains[int(row.argmax())] if total > 0 else "Identical selected scores"
-        for row, total in zip(contributions, contribution_total)
-    ]
+    # Explainability: Top contributing domain
+    contributions = diffs[positions] ** 2
+    max_dims = np.argmax(contributions, axis=1)
+    result["Top contributing domain"] = [effective_domains[int(idx)] for idx in max_dims]
 
-    # 4. Innovation Metrics: CMI, Means, Stds, & Dominant Outlier Decomposition
+    # Compute domain-profile spread metric
     means_dict = {d: float(scaler.mean_[i]) for i, d in enumerate(effective_domains)}
     stds_dict = {d: float(scaler.scale_[i]) for i, d in enumerate(effective_domains)}
-    target_z_dict = {
-        d: (chosen_values[d] - means_dict[d]) / (stds_dict[d] or 1.0)
-        for d in effective_domains
-    }
-    z_values = list(target_z_dict.values())
-    cmi = round(float(np.std(z_values)), 2)
+    target_z_dict = {d: (chosen_values[d] - means_dict[d]) / (stds_dict[d] or 1.0) for d in effective_domains}
+
+    z_vals = list(target_z_dict.values())
+    cmi = round(float(np.std(z_vals, ddof=0)), 2)
     dominant_domain = max(target_z_dict, key=target_z_dict.get)
     dominant_z = round(float(target_z_dict[dominant_domain]), 2)
 
@@ -216,61 +195,59 @@ def find_similar_schools(
         chosen_values, tuple(effective_domains), means_dict, stds_dict, dominant_domain, target_cmi=1.0
     )
 
-    # This is a navigation aid only; a domain score cannot establish program eligibility.
     grant_map = {
-        "Crime": "Title IV, Part A (Student Support & Academic Enrichment) & BJA STOP School Violence Act",
+        "Crime": "Title IV, Part A & STOP School Violence Act",
         "Housing": "McKinney-Vento Homeless Assistance Act",
         "Economic": "Title I, Part A Schoolwide Program Allocation",
         "Health": "HRSA School-Based Health Center Program",
-        "Education": "Title III English Language Acquisition & Academic Achievement",
+        "Education": "Title III English Language Acquisition",
     }
-    grant_program = grant_map.get(dominant_domain, "Explore federal and local program directories")
+    grant_program = grant_map.get(dominant_domain, "General Federal & State Formula Grants")
 
-    # 6. Generate a deterministic, explicitly caveated profile summary
-    peer_bullet_list = "\n".join([
+    peer_lines = "\n".join([
         f"- {r['Name']} ({r['City']}, {r['State']}) | Distance: {r['Distance']:.3f} | Top Driver: {r['Top contributing domain']}"
         for _, r in result.iterrows()
     ])
     brief_text = f"""================================================================================
 EXPLORATORY SCHOOL PROFILE COMPARISON
 Target Institution: {target['Name']} ({target['City']}, {target['State']})
-Identity: school name and location (not a federal identifier)
+Identity: school name and location (federal ID not utilized)
 ================================================================================
 
 1. DESCRIPTIVE DOMAIN PROFILE
-Composite score: {target[COMPOSITE]}. The highest cohort-relative domain z-score is
-{dominant_domain.upper()} (score: {chosen_values[dominant_domain]}, z: {dominant_z}σ).
+Composite score: {target[COMPOSITE]}. Highest relative domain: {dominant_domain.upper()} (score: {chosen_values[dominant_domain]}, z: {dominant_z:+.2f}σ).
+Domain-profile spread: {cmi}σ (descriptive standard deviation of selected domain z-scores).
 
-Domain-profile spread (legacy metric name CMI): {cmi}σ. This is the standard deviation
-of selected domain z-scores; it describes dispersion only and does not demonstrate
-causal effects, unmet need, formula distortion, or funding consequences.
-
-2. NEAREST PROFILE RECORDS (k-NN Subspace Retrieval)
-The following schools have the smallest standardized Euclidean distances in this
-selected profile space. These are exploratory comparisons, not validated twins:
-{peer_bullet_list}
+2. NEAREST PROFILE RECORDS (Subspace Retrieval)
+{peer_lines}
 
 3. PROGRAM AREA TO RESEARCH
-Potential reference area based on the highest relative domain: {grant_program}.
-This is not legal, funding, or eligibility advice. Confirm criteria and evidence with
-the administering agency before using any program reference.
+Reference: {grant_program}.
+Independent verification required; not a formal determination of funding eligibility.
 ================================================================================
-Generated via STEER, a CDC @ UNC datathon prototype.
 """
 
-    location_parts = []
-    if state:
-        location_parts.append(f"state: {state}")
+    scope_parts = [f"state: {state}"] if state and state != "Nationwide" else []
     if county:
-        location_parts.append(f"county: {county}")
-    scope = ", ".join(location_parts) if location_parts else "all states"
+        scope_parts.append(f"county: {county}")
+    scope = ", ".join(scope_parts) if scope_parts else "all states"
 
     return SearchResult(
-        target, chosen_values, result, tuple(effective_domains),
-        tuple(excluded_target_domains), excluded_missing_count, scope,
-        cmi=cmi, dominant_domain=dominant_domain, dominant_z=dominant_z,
-        grant_program=grant_program, brief_text=brief_text,
-        means=means_dict, stds=stds_dict, tipping_point_reduction=tipping_point,
+        target=target,
+        target_values=chosen_values,
+        matches=result,
+        domains=tuple(effective_domains),
+        excluded_target_domains=tuple(excluded_target_domains),
+        excluded_missing_count=excluded_missing_count,
+        scope_description=scope,
+        cmi=cmi,
+        dominant_domain=dominant_domain,
+        dominant_z=dominant_z,
+        grant_program=grant_program,
+        brief_text=brief_text,
+        means=means_dict,
+        stds=stds_dict,
+        tipping_point_reduction=tipping_point,
     )
 
 
@@ -280,59 +257,44 @@ def find_positive_deviants(
     k: int = 3,
     state: str | None = None,
 ) -> pd.DataFrame:
-    """Finds mentor schools facing matching community headwinds with superior education scores."""
-    headwind_domains = ["Economic", "Health", "Housing", "Crime"]
-    outcome_domain = "Education"
-    all_needed = headwind_domains + [outcome_domain]
+    """Find comparison institutions facing matching neighborhood headwinds with higher Education scores."""
+    headwinds = ["Economic", "Health", "Housing", "Crime"]
+    outcome = "Education"
+    required = headwinds + [outcome]
 
-    # Coerce to numeric FIRST so empty strings ("") become NaN before complete-case filtering
-    source = frame.copy(deep=False)
-    if state:
-        source = source.loc[source["State"].astype(str).str.strip().str.casefold() == state.strip().casefold()]
-    numeric = source.loc[:, all_needed].apply(pd.to_numeric, errors="coerce")
+    pool = frame.copy(deep=False)
+    if state and state != "Nationwide":
+        pool = pool.loc[pool["State"].astype(str).str.strip().str.casefold() == state.strip().casefold()]
+
+    numeric = pool.loc[:, required].apply(pd.to_numeric, errors="coerce")
     complete = numeric.notna().all(axis=1)
-    pool = source.loc[complete].copy().reset_index(drop=True)
-    numeric = numeric.loc[complete].copy().reset_index(drop=True)
+    pool = pool.loc[complete].reset_index(drop=True)
+    numeric = numeric.loc[complete].reset_index(drop=True)
 
-    identity_column = RECORD_KEY
-    target_rows = pool.loc[
-        pool[identity_column].astype(str).str.strip() == str(target_id).strip()
-    ]
+    target_rows = pool.loc[pool[RECORD_KEY].astype(str).str.strip() == str(target_id).strip()]
     if target_rows.empty:
         return pd.DataFrame()
     target_idx = target_rows.index[0]
 
-    candidates = pool.drop(index=target_idx).copy().reset_index(drop=True)
-    cand_numeric = numeric.drop(index=target_idx).copy().reset_index(drop=True)
+    candidates = pool.drop(index=target_idx).reset_index(drop=True)
+    cand_numeric = numeric.drop(index=target_idx).reset_index(drop=True)
 
     if len(candidates) < k:
         return pd.DataFrame()
 
     scaler = StandardScaler()
-    X_headwinds = scaler.fit_transform(
-        cand_numeric[headwind_domains].to_numpy(dtype=float)
-    )
-    target_vec = scaler.transform(
-        numeric.loc[target_idx, headwind_domains]
-        .to_numpy(dtype=float)
-        .reshape(1, -1)
-    )
+    X_headwinds = scaler.fit_transform(cand_numeric[headwinds].to_numpy(dtype=float))
+    target_vec = scaler.transform(numeric.loc[target_idx, headwinds].to_numpy(dtype=float).reshape(1, -1))
 
-    knn = NearestNeighbors(
-        n_neighbors=min(50, len(candidates)), metric="euclidean"
-    )
+    knn = NearestNeighbors(n_neighbors=min(50, len(candidates)), metric="euclidean")
     knn.fit(X_headwinds)
     dists, inds = knn.kneighbors(target_vec)
 
     mentor_pool = candidates.iloc[inds[0]].copy()
     mentor_pool["Headwind Match Distance"] = dists[0].round(3)
-    mentor_pool["Education Score"] = cand_numeric.loc[
-        inds[0], outcome_domain
-    ].values
-    target_edu = float(numeric.loc[target_idx, outcome_domain])
-    mentor_pool["Education Outperformance (+pts)"] = (
-        mentor_pool["Education Score"] - target_edu
-    ).round(1)
+    mentor_pool["Education Score"] = cand_numeric.loc[inds[0], outcome].values
+    target_edu = float(numeric.loc[target_idx, outcome])
+    mentor_pool["Education Outperformance (+pts)"] = (mentor_pool["Education Score"] - target_edu).round(1)
 
     deviants = (
         mentor_pool[mentor_pool["Education Outperformance (+pts)"] > 0]
@@ -348,14 +310,16 @@ def get_systemic_masking_leaderboard(
     state: str | None = None,
     n: int = 10,
 ) -> pd.DataFrame:
-    """Ranks rows by selected-domain z-score spread for exploratory profile review."""
+    """Rank schools by z-score spread across selected domains."""
     pool = frame.copy()
     if state and state != "Nationwide":
         pool = pool.loc[pool["State"].astype(str).str.strip().str.casefold() == state.strip().casefold()]
+
     numeric = pool.loc[:, list(domains)].apply(pd.to_numeric, errors="coerce")
     complete = numeric.notna().all(axis=1)
     pool = pool.loc[complete].copy()
     numeric = numeric.loc[complete].copy()
+
     if pool.empty:
         return pd.DataFrame()
 
@@ -372,25 +336,45 @@ def get_systemic_masking_leaderboard(
     return top[[c for c in cols if c in top.columns]].reset_index(drop=True)
 
 
-def synthesize_llm_grant_narrative(result: SearchResult, target_row: pd.Series) -> str:
-    """Draft a caveated descriptive summary with an optional LLM; never assert eligibility."""
-    key = os.environ.get("OPENAI_API_KEY")
-    if not key:
-        return result.brief_text
-
+def _resolve_gemini_key(user_key: str | None = None) -> str | None:
+    """Check user input, Streamlit secrets, and environment for Gemini API key."""
+    if user_key and user_key.strip():
+        return user_key.strip()
     try:
-        from openai import OpenAI
-        client = OpenAI(api_key=key)
-        prompt = f"""
+        import streamlit as st
+        if "GEMINI_API_KEY" in st.secrets:
+            return str(st.secrets["GEMINI_API_KEY"]).strip()
+        if "GOOGLE_API_KEY" in st.secrets:
+            return str(st.secrets["GOOGLE_API_KEY"]).strip()
+    except Exception:
+        pass
+    return os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+
+
+def synthesize_llm_grant_narrative(
+    result: SearchResult,
+    target_row: pd.Series,
+    user_api_key: str | None = None,
+) -> str:
+    """Draft a descriptive summary via Gemini API with zero-dependency REST fallback."""
+    api_key = _resolve_gemini_key(user_api_key)
+    if not api_key:
+        return (
+            result.brief_text
+            + "\n\n[Note: Gemini API Key not detected. Enter your key in the sidebar, "
+            "set GEMINI_API_KEY in your shell environment, or configure .streamlit/secrets.toml.]"
+        )
+
+    prompt = f"""
 Write a concise, neutral summary of exploratory school-profile calculations.
 Do not infer causes, school performance, need, intervention effects, funding eligibility,
-legal conclusions, or program suitability. Do not invent facts or citations. State that
-similarity and score adjustments are descriptive and require independent validation.
+or legal conclusions. Do not invent citations. State that similarity and score adjustments
+are descriptive and require independent validation.
 
 TARGET INSTITUTION: {target_row['Name']} ({target_row['City']}, {target_row['State']})
 COMPOSITE HARDSHIP SCORE: {target_row[COMPOSITE]} / 100
 Highest relative selected domain: {result.dominant_domain} ({result.dominant_z:+.2f}σ in this comparison cohort)
-Domain-profile spread (standard deviation of selected domain z-scores): {result.cmi}σ
+Domain-profile spread: {result.cmi}σ
 Potential program reference for independent research: {result.grant_program}
 Nearest comparison records:
 {result.matches[['Name', 'State', 'Distance', 'Top contributing domain']].head(3).to_string(index=False)}
@@ -398,12 +382,51 @@ Nearest comparison records:
 Include a short final sentence: "This exploratory output is not a funding recommendation
 or eligibility determination; verify all source data and program requirements independently."
 """
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.2,
-            max_tokens=600,
+
+    models_to_try = ["gemini-2.0-flash", "gemini-1.5-flash"]
+    last_error = ""
+
+    # Primary: Official google-genai SDK
+    try:
+        from google import genai
+        client = genai.Client(api_key=api_key)
+        for model_id in models_to_try:
+            try:
+                response = client.models.generate_content(
+                    model=model_id,
+                    contents=prompt,
+                )
+                if response.text:
+                    return response.text
+            except Exception as e:
+                last_error = str(e)
+                continue
+    except ImportError:
+        pass
+
+    # Zero-dependency REST fallback using standard library urllib
+    for model_id in models_to_try:
+        endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{model_id}:generateContent?key={api_key}"
+        payload = {"contents": [{"parts": [{"text": prompt}]}]}
+        req = urllib.request.Request(
+            endpoint,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
         )
-        return response.choices[0].message.content or result.brief_text
-    except Exception:
-        return result.brief_text
+        try:
+            with urllib.request.urlopen(req, timeout=25) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                text = data["candidates"][0]["content"]["parts"][0]["text"]
+                if text:
+                    return text
+        except urllib.error.HTTPError as err:
+            err_body = err.read().decode("utf-8", errors="replace")
+            last_error = f"HTTP {err.code}: {err.reason} - {err_body}"
+        except Exception as exc:
+            last_error = str(exc)
+
+    return (
+        result.brief_text
+        + f"\n\n[Gemini API Call Failed: {last_error}. Please check your API key and network connection.]"
+    )

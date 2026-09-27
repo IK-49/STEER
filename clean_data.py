@@ -1,4 +1,10 @@
-"""Read-only audit of the bundled school profile dataset."""
+"""
+Read-only audit of the bundled school profile dataset.
+
+Authors: Izad Khokhar, Aurick Smart, Anish Velagapudi
+AI Attribution: CLI scaffolding was initiated using AI suggestions and
+adapted by the team for read-only validation audits.
+"""
 
 from data import configured_data_path, load_dataset, missingness_summary
 

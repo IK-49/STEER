@@ -37,12 +37,19 @@ st.set_page_config(
     layout="wide",
 )
 
+# Custom presentation styling and uppercase sidebar navigation
 st.markdown(
     """
     <style>
     div[data-testid="stMetricValue"] {
         font-size: 1.85rem !important;
         font-weight: 700 !important;
+    }
+    /* Force sidebar navigation page labels to uppercase */
+    div[data-testid="stSidebarNav"] span {
+        text-transform: uppercase !important;
+        font-weight: 700 !important;
+        letter-spacing: 0.05em !important;
     }
     </style>
     """,
@@ -145,8 +152,6 @@ with st.sidebar:
         type="password",
         help="Optional API key from aistudio.google.com. Can also be set in .streamlit/secrets.toml.",
     )
-    if Path("pages/1_Story.py").exists():
-        st.page_link("pages/1_Story.py", label="View Project Story")
 
 state_value = None if state_filter == "Nationwide" else state_filter
 

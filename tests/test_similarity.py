@@ -1,3 +1,9 @@
+"""
+Integration tests for k-NN / similarity tooling.
+
+Authors: Izad Khokhar, Anish Velagapudi, Aurick Smart
+"""
+
 from pathlib import Path
 
 import pandas as pd
