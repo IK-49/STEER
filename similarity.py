@@ -71,32 +71,42 @@ def calculate_tipping_point(
     current_z = {d: (target_values[d] - means[d]) / (stds[d] or 1.0) for d in domains}
     other_mean = float(np.mean([value for domain, value in current_z.items() if domain != dominant_domain]))
     scale = stds[dominant_domain] or 1.0
+
+    def spread_after(reduction: float) -> float:
+        adjusted_z = [
+            (max(0.0, val_orig - reduction) - means[d]) / (stds[d] or 1.0)
+            if d == dominant_domain else current_z[d]
+            for d in domains
+        ]
+        return float(np.std(adjusted_z))
+
     # Variance is minimized when this domain's z-score reaches the mean of the others.
     best_reduction = min(val_orig, max(0.0, (current_z[dominant_domain] - other_mean) * scale))
-    best_z = [
-        (max(0.0, val_orig - best_reduction) - means[d]) / (stds[d] or 1.0)
-        if d == dominant_domain else current_z[d]
-        for d in domains
-    ]
-    if float(np.std(best_z)) > target_cmi:
+    if spread_after(best_reduction) > target_cmi:
         return None
 
     low, high = 0.0, best_reduction
 
-    for _ in range(25):
+    for _ in range(64):
         mid = (low + high) / 2.0
-        test_z = [
-            (max(0.0, val_orig - mid) - means[d]) / (stds[d] or 1.0) if d == dominant_domain
-            else current_z[d]
-            for d in domains
-        ]
-        if float(np.std(test_z)) <= target_cmi:
-            best_reduction = mid
+        if mid == low or mid == high:
+            break
+        if spread_after(mid) <= target_cmi:
             high = mid
         else:
             low = mid
 
-    return round(float(best_reduction), 1)
+    # Round upward to the next tenth so the displayed reduction is sufficient.
+    # Keep the score-zero cap: if the target is reachable only at zero, show the
+    # exact remaining score rather than a rounded amount larger than the score.
+    rounded_reduction = float(np.ceil(np.nextafter(high * 10.0, -np.inf)) / 10.0)
+    rounded_reduction = min(val_orig, rounded_reduction)
+    if spread_after(rounded_reduction) > target_cmi:
+        rounded_reduction = min(val_orig, rounded_reduction + 0.1)
+    if spread_after(rounded_reduction) > target_cmi:
+        return None
+
+    return rounded_reduction
 
 
 def find_similar_schools(
