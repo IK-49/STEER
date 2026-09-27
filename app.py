@@ -1,21 +1,42 @@
-"""STEER entry point: open the profile explorer by default."""
+"""
+STEER: Institutional Community Profile Explorer.
+
+Authors: Anish Velagapudi, Izad Khokhar, Aurick Smart
+AI Attribution: Initial application scaffolding, layout templates, and widget bindings
+were generated with assistance from AI tools (GitHub Copilot / LLM). Record filtering,
+out-of-sample scaling coordination, simulation workflows, chart geometry fallbacks,
+and presentation layouts were refactored and customized by the project team.
+"""
 
 from __future__ import annotations
 
 import textwrap
+from pathlib import Path
 
 import pandas as pd
 import plotly.graph_objects as go
-
 import streamlit as st
 
-st.set_page_config(page_title="STEER | School Profile Explorer", layout="wide")
+from data import (
+    COMPOSITE,
+    DOMAINS,
+    RECORD_KEY,
+    configured_data_path,
+    load_dataset,
+)
+from similarity import (
+    SearchError,
+    find_positive_deviants,
+    find_similar_schools,
+    get_systemic_masking_leaderboard,
+    synthesize_llm_grant_narrative,
+)
 
-explorer = st.Page("pages/explorer.py", title="Explorer", default=True)
-story = st.Page("pages/1_Story.py", title="Story")
-page = st.navigation([explorer, story], position="hidden")
+st.set_page_config(
+    page_title="STEER | School Profile Explorer",
+    layout="wide",
+)
 
-# Custom Presentation Styling: Enhanced font sizing and clean card spacing
 st.markdown(
     """
     <style>
@@ -23,25 +44,13 @@ st.markdown(
         font-size: 1.85rem !important;
         font-weight: 700 !important;
     }
-    .badge-sub {
-        display: inline-block;
-        font-size: 0.8rem;
-        font-weight: 700;
-        letter-spacing: 0.05em;
-        text-transform: uppercase;
-        color: #0284C7;
-        background-color: #E0F2FE;
-        padding: 4px 12px;
-        border-radius: 9999px;
-        margin-bottom: 6px;
-    }
     </style>
     """,
     unsafe_allow_html=True,
 )
 
 
-@st.cache_data(show_spinner="Loading institutional records…")
+@st.cache_data(show_spinner="Loading institutional records...")
 def get_data(path: str, modified_ns: int, size_bytes: int) -> pd.DataFrame:
     return load_dataset(path)
 
@@ -50,10 +59,8 @@ def school_label(row: pd.Series) -> str:
     return str(row.get("Display name") or f"{row['Name']} ({row['City']}, {row['State']})")
 
 
-# Hero Header with Competition Track Badge
-st.markdown('<div class="badge-sub">Carolina Data Challenge 2026 · AI for Social Good Track</div>', unsafe_allow_html=True)
 st.title("STEER: Explore School Community Profiles")
-st.caption("A descriptive profile comparison prototype for the Carolina Data Challenge")
+st.caption("Descriptive school community profile comparison prototype")
 
 try:
     data_path = configured_data_path()
@@ -63,21 +70,20 @@ except Exception as exc:
     st.error(f"Dataset could not be loaded: {exc}")
     st.stop()
 
-# Name and location provide record identity; federal identifiers are not loaded or used.
-with st.expander("🛠️ Source data and record identity", expanded=False):
+with st.expander("Source data and record identity", expanded=False):
     st.write(
-        "Federal school identifiers are not loaded. Records are selected and excluded from their own peer set "
-        "using school name, city, state, and district (county is used when district is missing)."
+        "Federal school identifiers (NCESSCH) are not loaded due to source formatting issues. "
+        "Records are identified and excluded from their own comparison pool using "
+        "school name, city, state, and district (county is used when district is missing)."
     )
 
-# Flagship Demonstration Default: Anchors to North Carolina's primary case study
 default_query = (
     "Northeast Regional"
     if schools["Name"].str.contains("Northeast Regional", case=False, na=False).any()
     else ""
 )
 query = st.text_input(
-        "Search school by name, city, or state:",
+    "Search school by name, city, or state:",
     value=default_query,
     max_chars=120,
     help="Tip: Try 'Northeast Regional' (NC) or 'D H Conley' (NC) to inspect schools tied at Composite 34.",
@@ -92,8 +98,7 @@ search_columns = ("Name", "City", "State")
 mask = pd.Series(False, index=schools.index)
 for column in search_columns:
     mask |= schools[column].astype("string").str.casefold().str.contains(needle, regex=False, na=False)
-# BUGFIX: count the true number of matches BEFORE truncating to 250,
-# and report that count (not len() on it -- it's already an int).
+
 total_matches = int(mask.sum())
 found = schools.loc[mask].head(250)
 
@@ -104,7 +109,8 @@ if found.empty:
 suggestion_keys = found[RECORD_KEY].head(5).tolist()
 st.caption(f"{total_matches:,} matching records · choose a suggestion")
 selected_id = st.pills(
-    "Matching schools", suggestion_keys,
+    "Matching schools",
+    suggestion_keys,
     selection_mode="single",
     default=suggestion_keys[0],
     format_func=lambda value: school_label(schools.loc[schools[RECORD_KEY].eq(value)].iloc[0]),
@@ -112,15 +118,35 @@ selected_id = st.pills(
     label_visibility="collapsed",
     width="stretch",
 )
+
 if selected_id is None:
     st.info("Choose a matching school to show its profile comparison.")
     st.stop()
+
 target = schools.loc[schools[RECORD_KEY].eq(selected_id)].iloc[0]
 
-# Subspace & Retrieval Sidebar
-
 with st.sidebar:
-    st.page_link(story, label="Story")
+    st.header("Search & Subspace Controls")
+    active_domains = st.multiselect(
+        "Active Subspace Dimensions:",
+        DOMAINS,
+        default=list(DOMAINS),
+    )
+    states = sorted(
+        schools["State"].dropna().astype(str).str.strip().loc[lambda v: v.ne("")].unique()
+    )
+    state_filter = st.selectbox("Geographic Scope:", ["Nationwide", *states])
+    k = st.slider("Number of comparison schools (k):", min_value=3, max_value=10, value=5)
+
+    st.markdown("---")
+    st.subheader("Model Configuration")
+    user_api_key = st.text_input(
+        "Gemini API Key (Google AI Studio):",
+        type="password",
+        help="Optional API key from aistudio.google.com. Can also be set in .streamlit/secrets.toml.",
+    )
+    if Path("pages/1_Story.py").exists():
+        st.page_link("pages/1_Story.py", label="View Project Story")
 
 state_value = None if state_filter == "Nationwide" else state_filter
 
@@ -132,42 +158,22 @@ except SearchError as exc:
     st.warning(str(exc))
     st.stop()
 
-# Top KPI Metric Cards
-st.markdown("---")
-m1, m2, m3, m4 = st.columns(4)
-m1.metric("Composite score", f"{target[COMPOSITE]:.1f} / 100", "Source value")
-m2.metric("Highest relative domain", result.dominant_domain.upper(), f"{result.dominant_z:+.2f}σ in selected cohort")
-m3.metric("Domain-profile spread", f"{result.cmi} σ", "Spread of selected domain z-scores")
-m4.metric(
-    "Program area to research",
-    # BUGFIX: word-boundary-aware truncation instead of a raw character slice,
-    # which could previously cut a program name mid-word (e.g. "...Health C").
-    textwrap.shorten(result.grant_program.split("&")[0].strip(), width=26, placeholder="…"),
-    "Not an eligibility finding",
-)
-st.markdown("---")
-st.caption(
-    f"Scope: {result.scope_description} · {len(result.domains)} selected domains · "
-    f"{result.excluded_missing_count:,} in-scope candidate records omitted for missing selected scores."
-)
-if result.excluded_target_domains:
-    st.info("The selected school has missing scores for: " + ", ".join(result.excluded_target_domains) + ". These domains were left out of this comparison.")
-
-# What-If Policy Intervention Simulator & Tipping Point Solver
-with st.expander("🧪 What-If Policy Intervention Simulator & Tipping Point Solver", expanded=False):
-    st.caption("Explore how a hypothetical score change affects the descriptive domain-profile spread. This does not estimate an intervention effect.")
+# What-If Policy Simulation
+simulated_result = None
+with st.expander("What-If Policy Intervention Simulator and Tipping Point Solver", expanded=False):
+    st.caption("Explore how a hypothetical score change affects the descriptive domain-profile spread.")
     sim_c1, sim_c2 = st.columns([1.6, 2.4])
     with sim_c1:
         default_sim_idx = active_domains.index(result.dominant_domain) if result.dominant_domain in active_domains else 0
         sim_domain = st.selectbox("Intervention Domain:", active_domains, index=default_sim_idx)
         if result.tipping_point_reduction is None:
-            st.markdown(f"🎯 No reduction from the current **{result.dominant_domain}** score down to zero brings the spread to 1.0σ or less under this calculation.")
+            st.markdown(f"No reduction from current **{result.dominant_domain}** score brings spread to 1.0σ or less.")
         elif result.tipping_point_reduction == 0:
-            st.markdown("🎯 The current profile already has a spread of 1.0σ or less.")
+            st.markdown("The current profile already has a spread of 1.0σ or less.")
         else:
             st.markdown(
-                f"🎯 A hypothetical `{result.tipping_point_reduction} point` reduction in **{result.dominant_domain}** "
-                "would bring the spread metric to 1.0σ or less under this calculation."
+                f"A hypothetical `{result.tipping_point_reduction} point` reduction in **{result.dominant_domain}** "
+                "would bring the spread metric to 1.0σ or less."
             )
     with sim_c2:
         relief_pts = st.slider(
@@ -177,72 +183,85 @@ with st.expander("🧪 What-If Policy Intervention Simulator & Tipping Point Sol
 
     if relief_pts > 0:
         if sim_domain not in result.target_values:
-            st.info(f"The selected school has no {sim_domain} score to adjust. Remove it from the selected domains or choose a different score.")
+            st.info(f"The selected school has no {sim_domain} score to adjust.")
         else:
             simulated_inputs = dict(result.target_values)
             simulated_inputs[sim_domain] = max(0.0, simulated_inputs[sim_domain] - relief_pts)
-            sim_result = find_similar_schools(
+            simulated_result = find_similar_schools(
                 schools, selected_id, active_domains, k=k, state=state_value, target_values=simulated_inputs,
             )
             st.success(
-                f"✓ **Hypothetical score adjustment:** {sim_domain} changed from {result.target_values[sim_domain]:.1f} → "
-                f"{sim_result.target_values[sim_domain]:.1f} | **Domain-profile spread:** {sim_result.cmi}σ "
-                f"(was {result.cmi}σ before the adjustment)"
+                f"Hypothetical score adjustment: {sim_domain} changed from {result.target_values[sim_domain]:.1f} → "
+                f"{simulated_result.target_values[sim_domain]:.1f} | Domain-profile spread: {simulated_result.cmi}σ "
+                f"(was {result.cmi}σ before adjustment)"
             )
-            result = sim_result
+
+active_display_result = simulated_result if simulated_result is not None else result
+
+# Metric Cards
+st.markdown("---")
+m1, m2, m3, m4 = st.columns(4)
+m1.metric("Composite score", f"{target[COMPOSITE]:.1f} / 100", "Source value")
+m2.metric("Highest relative domain", active_display_result.dominant_domain.upper(), f"{active_display_result.dominant_z:+.2f}σ in selected cohort")
+m3.metric("Domain-profile spread", f"{active_display_result.cmi} σ", "Standard deviation of domain z-scores")
+m4.metric(
+    "Program area to research",
+    textwrap.shorten(active_display_result.grant_program.split("&")[0].strip(), width=26, placeholder="..."),
+    "Not an eligibility finding",
+)
+st.markdown("---")
+st.caption(
+    f"Scope: {active_display_result.scope_description} · {len(active_display_result.domains)} selected domains · "
+    f"{active_display_result.excluded_missing_count:,} in-scope candidate records omitted for missing selected scores."
+)
+if active_display_result.excluded_target_domains:
+    st.info("The selected school has missing scores for: " + ", ".join(active_display_result.excluded_target_domains) + ". These domains were omitted.")
 
 tab1, tab2, tab3 = st.tabs([
-    "🕸️ Profile & Nearest Schools",
-    "🚀 Profile Comparisons",
-    "📊 Domain Spread Leaderboard",
+    "Profile & Nearest Schools",
+    "Profile Comparisons",
+    "Domain Spread Leaderboard",
 ])
 
 with tab1:
     st.subheader("Multi-domain profile")
     st.caption("Compare selected source scores with nearby points in the standardized feature space.")
 
-    # 1-Click "Composite Trap" Parity Toggle
-    # BUGFIX: match on the record identity key (name + city + state + district/county),
-    # not just Name, so a same-named school in a different state can't be picked up
-    # as the "D.H. Conley (NC)" comparison record.
     conley_matches = schools[
         schools["Name"].str.contains("D H Conley", case=False, na=False)
         & schools["State"].astype(str).str.strip().str.casefold().eq("nc")
     ]
-    conley_available = not conley_matches.empty and target[RECORD_KEY] != conley_matches.iloc[0][RECORD_KEY]
+    conley_available = (
+        not conley_matches.empty
+        and target[RECORD_KEY] != conley_matches.iloc[0][RECORD_KEY]
+        and str(target["State"]).strip().upper() == "NC"
+    )
 
     if conley_available:
         show_trap_overlay = st.checkbox(
-            "Compare with D.H. Conley High (NC)",
+            "Compare with (D.H. Conley High, NC) (Example)",
             value=False,
             help="Show a second named school profile for descriptive comparison.",
         )
     else:
         show_trap_overlay = False
 
-    if len(result.matches) > 0:
-        closest_peer = result.matches.iloc[0]
+    if len(active_display_result.matches) > 0:
+        closest_peer = active_display_result.matches.iloc[0]
 
-        if len(result.domains) < 2:
-            # BUGFIX: a radar/polar chart with a single repeated category is a
-            # degenerate shape (a sliver/point) and isn't a useful visual.
-            # Fall back to a plain comparison for the single selected domain.
-            single_domain = result.domains[0]
-            st.info(
-                "The profile radar needs at least two active domains to draw a shape. "
-                "Select more than one domain in the sidebar to see it. Showing the "
-                f"single **{single_domain}** value instead:"
-            )
-            st.metric(
-                f"{single_domain} — target vs. nearest peer vs. candidate mean",
-                f"{result.target_values[single_domain]:.1f}",
-                f"peer {float(closest_peer[single_domain]):.1f} · mean {result.means.get(single_domain, 0.0):.1f}",
-            )
+        if len(active_display_result.domains) < 3:
+            bar_df = pd.DataFrame({
+                "Domain": list(active_display_result.domains),
+                "Target": [active_display_result.target_values[d] for d in active_display_result.domains],
+                "Nearest Peer": [float(closest_peer[d]) for d in active_display_result.domains],
+                "Cohort Mean": [float(active_display_result.means.get(d, 0.0)) for d in active_display_result.domains],
+            })
+            st.bar_chart(bar_df.set_index("Domain"))
         else:
-            cats = list(result.domains) + [result.domains[0]]
-            t_vals = [result.target_values[d] for d in result.domains] + [result.target_values[result.domains[0]]]
-            p_vals = [float(closest_peer[d]) for d in result.domains] + [float(closest_peer[result.domains[0]])]
-            b_vals = [float(result.means.get(d, 0.0)) for d in result.domains] + [float(result.means.get(result.domains[0], 0.0))]
+            cats = list(active_display_result.domains) + [active_display_result.domains[0]]
+            t_vals = [active_display_result.target_values[d] for d in active_display_result.domains] + [active_display_result.target_values[active_display_result.domains[0]]]
+            p_vals = [float(closest_peer[d]) for d in active_display_result.domains] + [float(closest_peer[active_display_result.domains[0]])]
+            b_vals = [float(active_display_result.means.get(d, 0.0)) for d in active_display_result.domains] + [float(active_display_result.means.get(active_display_result.domains[0], 0.0))]
 
             fig_radar = go.Figure()
             fig_radar.add_trace(go.Scatterpolar(
@@ -262,7 +281,7 @@ with tab1:
 
             if show_trap_overlay and conley_available:
                 conley_row = conley_matches.iloc[0]
-                c_vals = [float(conley_row[d]) for d in result.domains] + [float(conley_row[result.domains[0]])]
+                c_vals = [float(conley_row[d]) for d in active_display_result.domains] + [float(conley_row[active_display_result.domains[0]])]
                 fig_radar.add_trace(go.Scatterpolar(
                     r=c_vals, theta=cats, fill="toself",
                     name=f"Comparison: {conley_row['Name'][:20]}", line=dict(color="#9333EA", width=2.5, dash="dot"),
@@ -278,18 +297,18 @@ with tab1:
             st.plotly_chart(fig_radar, width="stretch")
 
     if show_trap_overlay and conley_available:
-        st.info("These profiles illustrate differences among source dimensions. They do not establish school need, funding formulas, or suitable interventions.")
+        st.info("These profiles illustrate differences across source dimensions; they do not establish causal intervention requirements.")
 
     st.subheader("Nearest schools in the selected profile space")
     table_cols = [
         "Rank", "Name", "City", "State", COMPOSITE,
-        "Distance", "Top contributing domain", *result.domains,
+        "Distance", "Top contributing domain", *active_display_result.domains,
     ]
-    st.dataframe(result.matches[table_cols], hide_index=True, width="stretch")
+    st.dataframe(active_display_result.matches[table_cols], hide_index=True, width="stretch")
 
 with tab2:
     st.subheader("Profile comparisons")
-    st.caption("Lists nearby records on four selected community domains with a higher Education score. This association is descriptive, not causal or an operational best-practice finding.")
+    st.caption("Lists nearby records across four community stress domains with higher Education scores.")
     deviants = find_positive_deviants(schools, selected_id, k=3, state=state_value)
     if not deviants.empty:
         st.dataframe(
@@ -302,7 +321,7 @@ with tab2:
 with tab3:
     target_state = str(target["State"]).strip() if pd.notna(target["State"]) else "NC"
     st.subheader("Largest domain-profile spread")
-    st.caption("Schools with the largest spread across selected standardized domain scores. This is not a ranking of need or evidence that a composite score masks outcomes.")
+    st.caption("Schools with the largest dispersion across selected standardized domain scores.")
 
     lb_scope = st.radio(
         "Leaderboard Scope:",
@@ -311,40 +330,37 @@ with tab3:
         horizontal=True,
     )
     lb_state_filter = target_state if "Statewide" in lb_scope else None
-    leaderboard = get_systemic_masking_leaderboard(schools, domains=result.domains, state=lb_state_filter, n=10)
+    leaderboard = get_systemic_masking_leaderboard(schools, domains=active_display_result.domains, state=lb_state_filter, n=10)
     st.dataframe(leaderboard, hide_index=True, width="stretch")
 
 with st.expander("Method and interpretation"):
     st.markdown(
         """
-        - School identity uses name, city, state, and district, with county as a fallback. Federal identifiers are not loaded. Conflicting profiles on a name/location key stop the load.
-        - Missing values in selected domains are handled by complete-case filtering. No scores are imputed.
-        - `StandardScaler` is fit on the complete candidate pool for the selected domains. The target is transformed with that scaler; results are Euclidean distances in this feature space.
-        - Domain-profile spread is the standard deviation of selected domain z-scores. It is descriptive and depends on the selected domains and search scope.
-        - ODIS scores describe community conditions synthesized to School Attendance Boundaries. They are not school performance measures or causal estimates.
-        - Program names are references for independent research only. This app does not determine grant eligibility or recommend funding.
+        - School identity uses name, city, state, and district, with county as a fallback. Federal identifiers are omitted.
+        - Incomplete cases in selected domains are handled by complete-case filtering without imputation.
+        - StandardScaler is fit on the candidate pool for the selected domains; Euclidean distances are computed in that space.
+        - Domain-profile spread is the standard deviation of selected domain z-scores.
+        - ODIS scores describe synthesized community conditions within School Attendance Boundaries, not student or school performance.
+        - Program names serve as references for exploratory research only and do not establish funding eligibility.
         """
     )
 
-# Downstream Policy Actionable Artifact
 st.markdown("---")
-st.subheader("📄 Download exploratory profile summary")
+st.subheader("Download exploratory profile summary")
 
 col_brief_btn, col_brief_ai = st.columns([1, 1])
 with col_brief_btn:
     st.download_button(
-        label="📥 Download profile summary (.txt)",
-        data=result.brief_text,
+        label="Download profile summary (.txt)",
+        data=active_display_result.brief_text,
         file_name=f"STEER_Profile_Summary_{target['Name'].replace(' ', '_')}.txt",
         mime="text/plain",
     )
-    
+
 with col_brief_ai:
-    if st.button("✨ Draft descriptive summary with AI"):
-        with st.spinner("Drafting a descriptive summary…"):
-            brief_display = synthesize_llm_grant_narrative(result, target)
-
-        st.text_area("Profile summary preview:", brief_display, height=220)
-
-page.run()
-
+    if st.button("Draft descriptive summary with AI"):
+        with st.spinner("Drafting summary with AI model..."):
+            ai_summary = synthesize_llm_grant_narrative(
+                active_display_result, target, user_api_key=user_api_key
+            )
+        st.text_area("Profile summary preview:", ai_summary, height=220)
