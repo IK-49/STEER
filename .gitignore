@@ -4,3 +4,7 @@ cdc 26.pdf
 __pycache__/
 .pytest_cache/
 *.py[cod]
+.venv/
+env/
+*.env
+.DS_Store

@@ -17,6 +17,13 @@ DEFAULT_DATA_PATH = Path(__file__).resolve().parent / "pre_cleaned_data.csv"
 MAX_DATASET_BYTES = 100 * 1024 * 1024
 SCIENTIFIC_ID_PATTERN = r"^\s*[+-]?(?:\d+(?:\.\d*)?|\.\d+)[Ee][+-]?\d+\s*$"
 
+COLUMN_ALIASES = {
+    "School_Name": "Name",
+    "County_Name": "County",
+    "FIPS_County_Code": "FIPS County Code",
+    "Composite_Score": "Composite Score",
+}
+
 
 class DatasetValidationError(ValueError):
     """Raised when the source cannot safely support matching."""
@@ -41,6 +48,7 @@ def load_dataset(path: str | Path | None = None) -> pd.DataFrame:
         raise DatasetValidationError("Dataset is larger than the 100 MiB prototype limit.")
     try:
         frame = pd.read_csv(source, dtype={IDENTIFIER: "string"}, keep_default_na=False)
+        frame.rename(columns=COLUMN_ALIASES, inplace=True)
     except (OSError, UnicodeError, pd.errors.ParserError, pd.errors.EmptyDataError) as exc:
         raise DatasetValidationError(f"Could not read the dataset: {exc}") from exc
 
