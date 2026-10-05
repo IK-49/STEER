@@ -1,4 +1,12 @@
-"""Read-only loading of school profiles keyed by name and location."""
+"""
+Read-only loading of school profiles keyed by name and location.
+
+Authors: Izad Khokhar, Aurick Smart, Anish Velagapudi
+AI Attribution: Initial CSV parsing boilerplate and type annotation structures
+were scaffolded using AI tools (GitHub Copilot / LLM). Record identification
+deduplication, composite fallback key generation, and validation bounds were
+engineered, verified, and implemented by the project team.
+"""
 
 from __future__ import annotations
 
@@ -40,7 +48,7 @@ def _school_key(row: pd.Series, identity_columns: tuple[str, ...]) -> str:
 
 
 def load_dataset(path: str | Path | None = None) -> pd.DataFrame:
-    """Load relevant columns, never reading NCESSCH, and reject ambiguous name keys."""
+    """Load relevant columns, bypass reading NCESSCH, and reject ambiguous name keys."""
     source = Path(path).expanduser().resolve() if path else configured_data_path()
     if not source.is_file():
         raise DatasetValidationError(f"Dataset file was not found: {source}")
@@ -53,7 +61,7 @@ def load_dataset(path: str | Path | None = None) -> pd.DataFrame:
         required_missing = set(REQUIRED_COLUMNS) - available
         if required_missing:
             raise DatasetValidationError("Dataset is missing required columns: " + ", ".join(sorted(required_missing)))
-        # School District is loaded when present; County supplies the row-level fallback.
+
         use_columns = set(REQUIRED_COLUMNS) | set(IDENTITY_COLUMNS) | set(OPTIONAL_COLUMNS)
         frame = pd.read_csv(
             source,
@@ -64,26 +72,32 @@ def load_dataset(path: str | Path | None = None) -> pd.DataFrame:
         raise
     except (OSError, UnicodeError, pd.errors.ParserError, pd.errors.EmptyDataError) as exc:
         raise DatasetValidationError(f"Could not read the dataset: {exc}") from exc
+
     for column in (*IDENTITY_COLUMNS, *OPTIONAL_COLUMNS):
         if column not in frame:
             frame[column] = ""
         frame[column] = frame[column].astype("string").str.strip()
+
     for column in SCORE_COLUMNS:
         frame[column] = pd.to_numeric(frame[column].replace({token: pd.NA for token in NULL_TOKENS}), errors="coerce")
+
     if frame.empty:
         raise DatasetValidationError("Dataset contains no school records.")
+
     named = frame["Name"].fillna("").str.strip().ne("")
     frame = frame.loc[named].copy()
     district = frame["School District"].fillna("").str.strip()
     county = frame["County"].fillna("").str.strip()
     frame["_identity_area"] = district.where(district.ne(""), county)
     identity = ("Name", "City", "State", "_identity_area")
+
     profiles = frame.drop_duplicates(subset=[*identity, *SCORE_COLUMNS])
     counts = profiles.groupby(list(identity), dropna=False).size()
     if (counts > 1).any():
         raise DatasetValidationError(
             f"{int((counts > 1).sum())} name/location keys have different score profiles; clarify names before matching."
         )
+
     frame = profiles.drop_duplicates(subset=list(identity)).copy()
     frame[RECORD_KEY] = frame.apply(lambda row: _school_key(row, identity), axis=1)
     frame["Display name"] = frame.apply(
